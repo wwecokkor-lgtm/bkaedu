@@ -1,0 +1,261 @@
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===========================================================================
+    // 🛡️ SECURITY HELPER FUNCTIONS
+    // ===========================================================================
+
+    // Check if user is logged in
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user matches the document ID (Owner)
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Fetch user data from 'users' collection
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // Check if user has 'admin' or 'super_admin' role
+    function isAdmin() {
+      return isAuthenticated() && (
+        getUserData().role == 'admin' || 
+        getUserData().role == 'super_admin'
+      );
+    }
+
+    // Check if user is a student (default role)
+    function isStudent() {
+      return isAuthenticated(); 
+    }
+
+    // Check incoming data fields (Validation)
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===========================================================================
+    // 👤 USER MANAGEMENT
+    // ===========================================================================
+
+    match /users/{userId} {
+      // Public read allowed for profile display (instructors/leaders)
+      // Ideally restrict sensitive fields, but requires client-side adaptation.
+      allow read: if true;
+      
+      // User can create their own profile
+      allow create: if isOwner(userId);
+      
+      // User can update basic info, but NOT role or points
+      allow update: if (isOwner(userId) && 
+                       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'points', 'isBlocked', 'status'])) 
+                    || isAdmin();
+      
+      // Only Admin can delete users
+      allow delete: if isAdmin();
+    }
+
+    // ===========================================================================
+    // 📚 COURSES & CONTENT
+    // ===========================================================================
+
+    match /courses/{courseId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /enrollments/{enrollmentId} {
+      // Owner can see their enrollment, Admin can see all
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // User can create enrollment (free course) or Admin
+      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || isAdmin());
+      
+      // User can update progress, Admin can manage
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // ===========================================================================
+    // 📝 EXAMS & RESULTS
+    // ===========================================================================
+
+    match /exams/{examId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /results/{resultId} {
+      // User can read own results
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // User can submit result once
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      
+      // Results should typically be immutable by students
+      allow update, delete: if isAdmin();
+    }
+
+    // ===========================================================================
+    // 🗳️ VOTING & POLLS
+    // ===========================================================================
+
+    match /polls/{pollId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /poll_votes/{voteId} {
+      allow read: if isAuthenticated();
+      
+      // Ensure unique vote per user per poll using deterministic ID (pollId_userId)
+      allow create: if isAuthenticated() 
+                    && request.resource.id == request.resource.data.pollId + "_" + request.auth.uid
+                    && request.resource.data.userId == request.auth.uid;
+      
+      // Votes are permanent
+      allow delete: if false; 
+    }
+
+    // ===========================================================================
+    // 💬 COMMENTS & COMMUNITY
+    // ===========================================================================
+
+    match /comments/{commentId} {
+      allow read: if true;
+      
+      // Create own comment
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      
+      // Edit/Delete own comment or Admin moderation
+      allow update, delete: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
+    }
+
+    match /comment_likes/{likeId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /news/{newsId} {
+      allow read: if true;
+      allow write: if isAdmin(); // Includes incrementing views via API logic which might need update permissions, strict rule: isAdmin for content, maybe separate for counters?
+      // Note: incrementNewsView uses updateDoc. If we want users to increment view without being admin, we need conditional update rule.
+      // Allow updating ONLY 'views' field by anyone?
+      allow update: if isAdmin() || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views']));
+    }
+
+    // ===========================================================================
+    // ⚙️ SITE SETTINGS & CMS
+    // ===========================================================================
+
+    match /site_settings/{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /slides/{slideId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /popups/{popupId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /faqs/{faqId} {
+      allow read: if true;
+      // Allow admin full write, allow public to increment 'helpfulCount'
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['helpfulCount']));
+    }
+
+    match /payment_methods/{methodId} {
+      allow read: if isAuthenticated(); // Or true
+      allow write: if isAdmin();
+    }
+
+    match /campaigns/{campaignId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /coupons/{couponId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /sound_assets/{assetId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ===========================================================================
+    // 🔔 USER NOTIFICATIONS & ACTIVITY
+    // ===========================================================================
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      // System (Admin) creates, User updates 'isRead'
+      allow create: if isAdmin(); // Or cloud function
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /user_logs/{logId} {
+      // Allow user to read their own logs, Admin read all
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow write: if isAdmin(); // Usually created by admin actions
+    }
+
+    // ===========================================================================
+    // 💳 FINANCE & SUPPORT
+    // ===========================================================================
+
+    match /payments/{paymentId} {
+      // User sees own requests, Admin sees all
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // User creates request
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      
+      // Admin updates status (approve/reject)
+      allow update: if isAdmin();
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /messages/{messageId} {
+      allow create: if true; // Public contact form
+      allow read, update, delete: if isAdmin();
+    }
+
+    // ===========================================================================
+    // 📂 MEDIA FILES
+    // ===========================================================================
+
+    match /media_files/{fileId} {
+      allow read: if true;
+      allow create: if isAuthenticated(); // Users upload screenshots, profile pics
+      allow delete: if isAuthenticated() && (resource.data.uploadedBy == request.auth.uid || isAdmin());
+    }
+    
+    // ===========================================================================
+    // 🔒 REVIEWS
+    // ===========================================================================
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+  }
+}
